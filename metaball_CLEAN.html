@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Metaballs Animation - Paper.js</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            width: 100%;
+            height: 100%;
+            background: white;
+        }
+        canvas {
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100% !important;
+            height: 100% !important;
+        }
+    </style>
+    <!-- Load Paper.js (local with CDN fallback) -->
+    <script src="paper-full.min.js" onerror="this.onerror=null;this.src='https://cdnjs.cloudflare.com/ajax/libs/paper.js/0.12.17/paper-full.min.js'"></script>
+</head>
+<body>
+    <!-- Canvas element for Paper.js -->
+    <canvas id="metaballCanvas" resize></canvas>
+
+    <!-- Metaball animation script (inline to avoid CORS issues) -->
+    <script type="text/paperscript" canvas="metaballCanvas">
+// ============================================================================
+// METABALLS ANIMATION - Paper.js Version
+// ============================================================================
+// Système de connexion organique avec animation fluide :
+// - Connexion = pont metaball classique
+// - Rétractation = crossfade pont -> 2 gouttes
+// - Gouttes : pointe se rétracte en premier, base ensuite
+// ============================================================================
+
+// Configuration du style par défaut
+project.currentStyle = {
+    fillColor: 'black'
+};
+
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
+
+// Positions initiales des petites boules fixes (5 boules seulement)
+// Ces positions seront mises à jour depuis TouchDesigner via un DAT Table
+// Format 1080x1080 (carré) - Disposition circulaire ÉGALE
+// Centre: (540, 540), Rayon: 405px, espacées exactement de 72°
+var ballPositions = [
+    [540, 135],   // Boule 0 - angle -90° (Nord)
+    [925, 415],   // Boule 1 - angle -18° (Nord-Est)
+    [778, 868],   // Boule 2 - angle 54° (Sud-Est)
+    [302, 868],   // Boule 3 - angle 126° (Sud-Ouest)
+    [155, 415]    // Boule 4 - angle 198° (Nord-Ouest)
+];
+
+// Paramètres de forme
+var handle_len_rate = 2.4;  // Courbure des courbes de Bézier (valeur originale)
+
+// Paramètres de connexion
+var CONNECT_DISTANCE = 480;           // Distance maximale de connexion (1.5x plus loin)
+var GROWTH_SPEED_CONNECT = 0.12;      // Vitesse de croissance du pont
+var GROWTH_SPEED_RETRACT = 0.04;      // Vitesse de rétractation (plus lent)
+// Paramètres d'animation de taille des boules
+var BALL_RADIUS_MIN = 38;             // Taille minimale quand loin du hero (45 × 0.85 = -15%)
+var BALL_RADIUS_MAX = 74;             // Taille maximale quand proche du hero (62 × 1.2 = +20%)
+var BALL_SIZE_SPEED = 0.08;           // Vitesse d'animation de la taille
+
+// ============================================================================
+// INITIALISATION DES BOULES
+// ============================================================================
+
+var circlePaths = [];
+
+// Création des petites boules fixes (40% plus petites)
+for (var i = 0, l = ballPositions.length; i < l; i++) {
+    var circlePath = new Path.Circle({
+        center: ballPositions[i],
+        radius: 48  // 80 × 0.6 = 48
+    });
+    circlePaths.push(circlePath);
+}
+
+// Création de la grosse boule contrôlée par la souris (hero)
+// Position centrée pour format 1080x1080
+var largeCircle = new Path.Circle({
+    center: [540, 540],
+    radius: 54  // 90 × 0.6 = 54 (40% plus petit)
+});
+circlePaths.push(largeCircle);
+
+var userIndex = circlePaths.length - 1;
+var userBall = largeCircle;
+
+// ============================================================================
+// API TOUCHDESIGNER - CONTRÔLE EXTERNE
+// ============================================================================
+
+// Contrôler la position du hero
+window.setHeroPosition = function(x, y) {
+    if (userBall && userBall.position) {
+        userBall.position.x = x;
+        userBall.position.y = y;
+        userBall.visible = true;  // Rendre visible quand on met à jour la position
+
+        // Annuler la rétractation si le hero revient
+        isRetracting = false;
+    }
+};
+
+// Cacher le hero (quand main MediaPipe inactive) - DEPRECATED
+// Utilisez window.retractBridges() à la place
+window.hideHero = function() {
+    if (userBall) {
+        userBall.visible = false;
+    }
+};
+
+// Déclencher rétractation des bridges (nouvelle méthode)
+window.retractBridges = function(lastX, lastY) {
+    console.log('Bridge retraction triggered:', lastX, lastY);
+    isRetracting = true;
+    retractStartTime = Date.now();
+    retractLastHeroX = lastX;
+    retractLastHeroY = lastY;
+
+    // Cacher le hero réel immédiatement
+    if (userBall) {
+        userBall.visible = false;
+    }
+};
+
+// Montrer le hero
+window.showHero = function() {
+    if (userBall) {
+        userBall.visible = true;
+    }
+};
+
+// Contrôler la taille du hero
+window.setHeroRadius = function(radius) {
+    if (userBall) {
+        var scale = radius / (userBall.bounds.width / 2);
+        userBall.scale(scale);
+    }
+};
+
+// Contrôler la position d'une boule spécifique (index 0-11)
+window.setBallPosition = function(index, x, y) {
+    if (index >= 0 && index < circlePaths.length - 1) {
+        circlePaths[index].position.x = x;
+        circlePaths[index].position.y = y;
+    }
+};
+
+// Contrôler la taille d'une boule spécifique (index 0-11)
+window.setBallRadius = function(index, radius) {
+    if (index >= 0 && index < circlePaths.length - 1) {
+        var ball = circlePaths[index];
+        var scale = radius / (ball.bounds.width / 2);
+        ball.scale(scale);
+    }
+};
+
+// Contrôler toutes les positions des boules (array de 12 paires [x,y])
+window.setAllBallPositions = function(positions) {
+    for (var i = 0; i < Math.min(positions.length, circlePaths.length - 1); i++) {
+        if (positions[i] && positions[i].length === 2) {
+            circlePaths[i].position.x = positions[i][0];
+            circlePaths[i].position.y = positions[i][1];
+        }
+    }
+};
+
+// Contrôler toutes les tailles des boules (array de 12 rayons)
+window.setAllBallRadii = function(radii) {
+    for (var i = 0; i < Math.min(radii.length, circlePaths.length - 1); i++) {
+        if (radii[i]) {
+            var ball = circlePaths[i];
+            var scale = radii[i] / (ball.bounds.width / 2);
+            ball.scale(scale);
+        }
+    }
+};
+
+// Obtenir les infos actuelles
+window.getMetaballsInfo = function() {
+    var info = {
+        balls: [],
+        hero: {
+            x: userBall.position.x,
+            y: userBall.position.y,
+            radius: userBall.bounds.width / 2
+        }
+    };
+    for (var i = 0; i < circlePaths.length - 1; i++) {
+        info.balls.push({
+            index: i,
+            x: circlePaths[i].position.x,
+            y: circlePaths[i].position.y,
+            radius: circlePaths[i].bounds.width / 2
+        });
+    }
+    return info;
+};
+
+// ============================================================================
+// GESTION DES CONNEXIONS
+// ============================================================================
+
+var connections = new Group();
+var connectionMap = {};
+
+function createConnection(i, ball, userBall) {
+    connectionMap[i] = {
+        path: null,
+        progress: 0,      // 0 = pas de connexion, 1 = connexion maximale
+        target: 1,        // Valeur cible pour l'animation
+        ball: ball,
+        userBall: userBall,
+        currentRadius: BALL_RADIUS_MIN,  // Rayon actuel de la boule
+        targetRadius: BALL_RADIUS_MAX    // Rayon cible de la boule
+    };
+}
+
+// ============================================================================
+// ÉVÉNEMENTS
+// ============================================================================
+
+// Suivi de la souris
+function onMouseMove(event) {
+    userBall.position = event.point;
+}
+
+// Boucle d'animation principale
+function onFrame(event) {
+    // === MODE RÉTRACTATION ===
+    // Si en mode rétractation, animer le hero virtuel vers les boules
+    var virtualHeroX = userBall.position.x;
+    var virtualHeroY = userBall.position.y;
+    var retractProgress = 0;
+
+    if (isRetracting) {
+        var elapsed = Date.now() - retractStartTime;
+        retractProgress = Math.min(elapsed / RETRACT_DURATION, 1.0);
+
+        // Sécurité: vérifier que les valeurs sont valides
+        if (isNaN(retractLastHeroX) || isNaN(retractLastHeroY)) {
+            console.error('Invalid retract position, aborting');
+            isRetracting = false;
+            return;
+        }
+
+        // Easing: ease-out cubic (démarrage rapide, fin lente)
+        var t = 1 - Math.pow(1 - retractProgress, 3);
+
+        // Pour chaque boule connectée, interpoler vers sa position
+        // On utilise la position moyenne pondérée des boules connectées
+        var totalWeight = 0;
+        var weightedX = 0;
+        var weightedY = 0;
+
+        for (var i = 0; i < circlePaths.length; i++) {
+            if (i === userIndex) continue;
+
+            var ball = circlePaths[i];
+            var entry = connectionMap[i];
+
+            // Calculer distance initiale depuis dernière position hero
+            var dx = retractLastHeroX - ball.position.x;
+            var dy = retractLastHeroY - ball.position.y;
+            var initialDist = Math.sqrt(dx * dx + dy * dy);
+
+            // Si était connecté (distance <= CONNECT_DISTANCE)
+            if (initialDist <= CONNECT_DISTANCE) {
+                // Poids basé sur proximité (plus proche = plus de poids)
+                var weight = 1 - (initialDist / CONNECT_DISTANCE);
+                totalWeight += weight;
+                weightedX += ball.position.x * weight;
+                weightedY += ball.position.y * weight;
+            }
+        }
+
+        // Position virtuelle du hero (interpolée)
+        if (totalWeight > 0) {
+            var targetX = weightedX / totalWeight;
+            var targetY = weightedY / totalWeight;
+
+            virtualHeroX = retractLastHeroX + t * (targetX - retractLastHeroX);
+            virtualHeroY = retractLastHeroY + t * (targetY - retractLastHeroY);
+        } else {
+            // Aucune boule connectée, garder position initiale
+            virtualHeroX = retractLastHeroX;
+            virtualHeroY = retractLastHeroY;
+        }
+
+        // Fin de la rétractation
+        if (retractProgress >= 1.0) {
+            console.log('Bridge retraction complete');
+            isRetracting = false;
+        }
+    }
+
+    // 1) Déterminer quelles boules doivent être connectées et calculer leur taille cible
+    for (var i = 0; i < circlePaths.length; i++) {
+        if (i === userIndex) continue; // Connexion uniquement hero <-> autres
+
+        var ball = circlePaths[i];
+
+        // Utiliser position virtuelle si en rétractation, sinon position réelle
+        var heroX = isRetracting ? virtualHeroX : userBall.position.x;
+        var heroY = isRetracting ? virtualHeroY : userBall.position.y;
+
+        var dx = heroX - ball.position.x;
+        var dy = heroY - ball.position.y;
+        var dist = Math.sqrt(dx * dx + dy * dy);
+
+        var entry = connectionMap[i];
+
+        // Calculer le rayon cible basé sur la distance
+        var distanceRatio = Math.min(dist / CONNECT_DISTANCE, 1.0); // 0 = proche, 1 = loin
+        var targetRadius = BALL_RADIUS_MAX - (distanceRatio * (BALL_RADIUS_MAX - BALL_RADIUS_MIN));
+
+        if (dist <= CONNECT_DISTANCE) {
+            // Dans la zone de connexion
+            if (!entry) {
+                createConnection(i, ball, userBall);
+                entry = connectionMap[i];
+            }
+            entry.target = 1;   // Mode connexion
+            entry.targetRadius = targetRadius;
+        } else if (entry) {
+            // Hors zone de connexion
+            entry.target = 0;   // Mode rétractation
+            entry.targetRadius = BALL_RADIUS_MIN;
+        } else {
+            // Pas de connexion, mais animer la taille quand même
+            // Créer une entrée temporaire juste pour la taille
+            if (!entry) {
+                createConnection(i, ball, userBall);
+                entry = connectionMap[i];
+                entry.target = 0;
+                entry.progress = 0;
+            }
+            entry.targetRadius = BALL_RADIUS_MIN;
+        }
+    }
+
+    // 2) Animer chaque connexion et la taille des boules
+    for (var key in connectionMap) {
+        if (!connectionMap.hasOwnProperty(key)) continue;
+        var data = connectionMap[key];
+
+        // Animation progressive de la connexion
+        var speed = data.target === 1 ? GROWTH_SPEED_CONNECT : GROWTH_SPEED_RETRACT;
+        data.progress += (data.target - data.progress) * speed;
+        var t = data.progress;
+
+        // Animation de la taille de la boule
+        if (data.currentRadius === undefined) {
+            data.currentRadius = BALL_RADIUS_MIN;
+        }
+        data.currentRadius += (data.targetRadius - data.currentRadius) * BALL_SIZE_SPEED;
+
+        // Appliquer la nouvelle taille à la boule
+        var ball = data.ball;
+        var currentBallRadius = ball.bounds.width / 2;
+        if (Math.abs(currentBallRadius - data.currentRadius) > 0.5) {
+            var scaleFactor = data.currentRadius / currentBallRadius;
+            ball.scale(scaleFactor);
+        }
+
+        // Nettoyage quand complètement rétracté et taille minimale atteinte
+        if (t < 0.01 && data.target === 0 && Math.abs(data.currentRadius - BALL_RADIUS_MIN) < 1) {
+            if (data.path) data.path.remove();
+            delete connectionMap[key];
+            continue;
+        }
+
+        // Générer la nouvelle forme de connexion
+        var retracting = (data.target === 0);
+
+        // Si en mode rétractation, créer un hero virtuel temporaire
+        var effectiveUserBall = data.userBall;
+        if (isRetracting) {
+            // Créer une copie temporaire avec position virtuelle
+            effectiveUserBall = {
+                position: {
+                    x: virtualHeroX,
+                    y: virtualHeroY
+                },
+                bounds: {
+                    width: data.userBall.bounds.width
+                }
+            };
+        }
+
+        var newShape = metaballAnimated(data.ball, effectiveUserBall, t, retracting);
+
+        // Remplacer l'ancienne forme
+        if (data.path) {
+            data.path.remove();
+        }
+
+        if (newShape) {
+            connections.addChild(newShape);
+            data.path = newShape;
+        } else {
+            data.path = null;
+        }
+    }
+}
+
+// ============================================================================
+// ROUTEUR D'ANIMATION : PONT <-> GOUTTES
+// ============================================================================
+
+function metaballAnimated(ball1, ball2, t, retracting) {
+    if (t <= 0) return null;
+
+    var group = new Group();
+
+    if (!retracting) {
+        // ===== PHASE CONNEXION : Pont metaball uniquement =====
+        var bridge = metaballBridge(ball1, ball2, t);
+        if (bridge) {
+            bridge.opacity = 1;
+            group.addChild(bridge);
+        }
+    } else {
+        // ===== PHASE DÉCONNEXION : Crossfade pont -> 2 gouttes =====
+
+        // Fenêtres de transition :
+        // t > 0.85  : pont seulement
+        // 0.45-0.85 : mélange pont + gouttes
+        // t < 0.45  : gouttes seulement
+
+        var bridgeOpacity = 0;
+        var dropletOpacity = 0;
+
+        if (t > 0.85) {
+            bridgeOpacity = 1;
+            dropletOpacity = 0;
+        } else if (t > 0.45) {
+            var mix = (0.85 - t) / (0.85 - 0.45);  // 0 → 1 quand t descend
+            bridgeOpacity  = 1 - mix;
+            dropletOpacity = mix;
+        } else {
+            bridgeOpacity = 0;
+            dropletOpacity = 1;
+        }
+
+        // Rendu du pont avec fade out
+        if (bridgeOpacity > 0.001) {
+            var bridge = metaballBridge(ball1, ball2, t);
+            if (bridge) {
+                bridge.opacity = bridgeOpacity;
+                group.addChild(bridge);
+            }
+        }
+
+        // Rendu des gouttes avec fade in
+        if (dropletOpacity > 0.001) {
+            var droplets = createDropletPair(ball1, ball2, t);
+            if (droplets) {
+                droplets.opacity = dropletOpacity;
+                group.addChild(droplets);
+            }
+        }
+    }
+
+    if (group.children.length === 0) {
+        group.remove();
+        return null;
+    }
+    return group;
+}
+
+// ============================================================================
+// PONT METABALL CLASSIQUE
+// ============================================================================
+
+function metaballBridge(ball1, ball2, t) {
+    var center1 = ball1.position;
+    var center2 = ball2.position;
+    var radius1 = ball1.bounds.width / 2;
+    var radius2 = ball2.bounds.width / 2;
+    var pi2 = Math.PI / 2;
+
+    var dir = center2 - center1;
+    var d = dir.length;
+    if (d <= 0) return null;
+
+    // Utilitaires mathématiques
+    function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+    function safeAcos(x) { return Math.acos(clamp(x, -1, 1)); }
+
+    // Calcul des angles de tangence
+    var u1, u2;
+    if (d < radius1 + radius2) {
+        u1 = safeAcos((radius1 * radius1 + d * d - radius2 * radius2) / (2 * radius1 * d));
+        u2 = safeAcos((radius2 * radius2 + d * d - radius1 * radius1) / (2 * radius2 * d));
+    } else {
+        u1 = 0;
+        u2 = 0;
+    }
+
+    var v = 0.5;
+    var angle1 = dir.getAngleInRadians();
+    var angle2 = safeAcos((radius1 - radius2) / d);
+
+    // Croissance progressive du pont
+    var growBase = Math.pow(t, 0.75);
+    var r1 = radius1 * growBase;
+    var r2 = radius2 * growBase;
+    if (r1 <= 0 || r2 <= 0) return null;
+
+    // Calcul des 4 points de contact
+    var angle1a = angle1 + u1 + (angle2 - u1) * v;
+    var angle1b = angle1 - u1 - (angle2 - u1) * v;
+    var angle2a = angle1 + Math.PI - u2 - (Math.PI - u2 - angle2) * v;
+    var angle2b = angle1 - Math.PI + u2 + (Math.PI - u2 - angle2) * v;
+
+    var p1a = center1 + getVector(angle1a, r1);
+    var p1b = center1 + getVector(angle1b, r1);
+    var p2a = center2 + getVector(angle2a, r2);
+    var p2b = center2 + getVector(angle2b, r2);
+
+    // Calcul des longueurs de handles
+    var totalRadius = r1 + r2;
+    var d2 = Math.min(v * handle_len_rate, p1a.getDistance(p2a) / totalRadius);
+    d2 *= Math.min(1, d * 2 / totalRadius);
+
+    var h1 = r1 * d2;
+    var h2 = r2 * d2;
+
+    // Création du chemin avec courbes de Bézier
+    var path = new Path({
+        segments: [p1a, p2a, p2b, p1b],
+        closed: true,
+        fillColor: 'black'
+    });
+
+    var s = path.segments;
+    s[0].handleOut = getVector(angle1a - pi2, h1);
+    s[1].handleIn  = getVector(angle2a + pi2, h2);
+    s[2].handleOut = getVector(angle2b - pi2, h2);
+    s[3].handleIn  = getVector(angle1b + pi2, h1);
+
+    // Anti-serpentement : limiter les handles
+    clampHandles(s[0], s[1], 0.45);
+    clampHandles(s[1], s[2], 0.45);
+    clampHandles(s[2], s[3], 0.45);
+
+    return path;
+}
+
+// ============================================================================
+// SYSTÈME DE GOUTTES (RÉTRACTATION ORGANIQUE)
+// ============================================================================
+
+function createDropletPair(ball1, ball2, t) {
+    var d1 = createDroplet(ball1, ball2, t);
+    var d2 = createDroplet(ball2, ball1, t);
+    if (!d1 && !d2) return null;
+    if (d1 && d2) return new Group([d1, d2]);
+    return d1 || d2;
+}
+
+// Goutte individuelle : base = boule, pointe vers l'autre boule
+// t décroit de ~1 → 0 en rétractation
+// - la POINTE disparaît vite (t^2), revient vers la boule
+// - la BASE ne commence à se rétracter que quand la pointe est presque revenue
+function createDroplet(baseBall, otherBall, t) {
+    if (t <= 0.05) return null;
+
+    var centerBase = baseBall.position;
+    var centerOther = otherBall.position;
+    var radiusBase0 = baseBall.bounds.width / 2;
+
+    var dir = centerOther - centerBase;
+    var d = dir.length;
+    if (d <= 0) return null;
+    var n = dir.normalize();
+
+    // ===== RÉTRACTATION DE LA BASE (TARDIVE) =====
+    var baseThreshold = 0.15;  // La base bouge seulement après t < 0.15
+    var baseScale;
+    if (t > baseThreshold) {
+        baseScale = 1.0;  // Base reste pleine
+    } else {
+        var kBase = t / baseThreshold;
+        baseScale = 0.2 + 0.8 * kBase;  // Descend vers 0.2
+    }
+    baseScale = Math.max(0.1, baseScale);
+    var rBase = radiusBase0 * baseScale;
+
+    // ===== RÉTRACTATION DE LA POINTE (RAPIDE) =====
+    var tipPhase = t * t;  // Quadratique → disparaît vite
+    var tipR = radiusBase0 * 0.4 * tipPhase;
+    var minTipR = radiusBase0 * 0.05;
+    if (tipR < minTipR) tipR = minTipR;
+
+    // ===== LONGUEUR DE LA GOUTTE =====
+    var maxExtra = Math.min(d * 0.5, radiusBase0 * 2.5);
+    var lengthPhase = t;
+    var L = radiusBase0 + maxExtra * lengthPhase;
+
+    var tipCenter = centerBase + n * L;
+
+    // Création du metaball local base ↔ pointe
+    var path = metaballLocal(centerBase, rBase, tipCenter, tipR);
+    if (!path) return null;
+
+    var s = path.segments;
+
+    // ===== TRANSFORMATION EN POINTE =====
+    // Segments 1 & 2 = côté pointe
+    // On les rapproche vers un point central pour créer une vraie pique
+    var tipMid = s[1].point.add(s[2].point).divide(2);
+    var kTip = tipPhase;  // 1 = forme metaball, 0 = pointe effilée
+
+    s[1].point = tipMid.add(s[1].point.subtract(tipMid).multiply(kTip));
+    s[2].point = tipMid.add(s[2].point.subtract(tipMid).multiply(kTip));
+
